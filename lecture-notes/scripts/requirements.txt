@@ -1,0 +1,7 @@
+python-docx
+pymupdf
+pymupdf4llm
+pillow
+lxml
+latex2mathml
+pypandoc_binary
