@@ -204,6 +204,12 @@ body.note { font-size: calc(16px * var(--fs, 1)); }
   .top nav { padding: 8px 14px; gap: 4px 14px; font-size: 14px; }
 }
 @media print { .chapbar, .fab, .toc, .chapnav, .top { display: none !important; } .chap[hidden] { display: block !important; } .wrap { display: block; } }
+
+@media (max-width: 860px) {
+  .toc { height: 100vh; height: 100dvh; bottom: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y; }
+  body.drawer { overflow: hidden; }
+  body.drawer .scrim { touch-action: none; }
+}
 </style>
 </head>
 <body class="note">
@@ -286,13 +292,27 @@ body.note { font-size: calc(16px * var(--fs, 1)); }
     const k = chapOf(decodeURIComponent(m[1]));
     if (k < 0) return;
     e.preventDefault();
-    document.body.classList.remove('drawer');
+    setDrawer(false);
     show(k, chaps[k].id === m[1] ? null : m[1], true);
   });
   addEventListener('hashchange', fromHash);
 
   // 목차 서랍(휴대폰)
-  const toggle = open => document.body.classList.toggle('drawer', open);
+  let lockY = 0;
+  function setDrawer(open) {
+    const b = document.body, on = b.classList.contains('drawer');
+    if (open === on) return;
+    if (open) {
+      lockY = scrollY;
+      b.style.position = 'fixed'; b.style.top = -lockY + 'px'; b.style.left = '0'; b.style.right = '0';
+      b.classList.add('drawer');
+    } else {
+      b.classList.remove('drawer');
+      b.style.position = b.style.top = b.style.left = b.style.right = '';
+      scrollTo(0, lockY);
+    }
+  }
+  const toggle = open => setDrawer(open);
   document.getElementById('tocBtn').addEventListener('click', () => {
     toggle(!document.body.classList.contains('drawer'));
     const here = document.querySelector('.toc a.here') || document.querySelector('.toc .ch.on > a');
