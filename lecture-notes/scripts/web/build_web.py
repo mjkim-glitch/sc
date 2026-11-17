@@ -174,7 +174,7 @@ li.check input { accent-color: var(--accent); margin-right: 6px; }
 """
 
 
-def page(title, cur, body, extra_head="", toc_html="", single=False, extra_js=""):
+def page(title, cur, body, extra_head="", toc_html="", single=False, extra_js="", mathjax=None, body_class=""):
     nav = [("index.html", "처음")] + [(h, lab) for h, lab in
            [("guide.html", "스터디 가이드"), ("exam.html", "모의고사"), ("mindmap.html", "마인드맵"), ("note.html", "정리 노트")]
            if HAVE.get(h)]
@@ -188,10 +188,10 @@ def page(title, cur, body, extra_head="", toc_html="", single=False, extra_js=""
 <title>{html.escape(title)}</title>
 {FONTS}
 <style>{CSS}</style>
-{MATHJAX}
+{MATHJAX if mathjax is None else mathjax}
 {extra_head}
 </head>
-<body>
+<body{f' class="{body_class}"' if body_class else ""}>
 <header class="top"><nav><a class="brand" href="index.html">{html.escape(TITLE)}</a>{links}</nav></header>
 {layout}
 {extra_js}
@@ -213,17 +213,276 @@ def read_lines(p):
     return open(p, encoding="utf-8").read().replace("\r\n", "\n").split("\n")
 
 
+NOTE_ALL = False  # --note-all: 예전처럼 한 페이지에 전부
+
+
+def split_chapters(lines):
+    """노트 본문(제목 줄 뺀 것) → (머리말 줄, [(대분류 제목, 줄 목록), …]). 대분류(`# `) 하나 = 강의자료 하나."""
+    pre, chaps = [], []
+    for l in lines:
+        if re.match(r"^# \S", l):
+            chaps.append((l[2:].strip(), [l]))
+        elif chaps:
+            chaps[-1][1].append(l)
+        else:
+            pre.append(l)
+    for _, ls in chaps:  # 대분류 사이 구분선(---)은 과 나누기로 대신한다
+        while ls and ls[-1].strip() in ("", "---"):
+            ls.pop()
+    return pre, chaps
+
+
+NOTE_LEGEND = ('<div class="legend"><span>검정 = 강의자료</span><span class="tag hw">필기</span><span class="tag board">판서</span>'
+               '<span style="color:var(--lec)">회색 = 강의 녹음</span><span style="color:var(--imp);font-weight:700">빨강 = 교수 강조</span>'
+               '<span style="color:var(--ext)">파랑 = 자료에 없음</span><mark>핵심</mark><mark class="pink">헷갈림</mark><mark class="blue">반대편</mark></div>')
+
+# 노트 페이지는 과를 열 때 그 과만 수식을 그린다(숨긴 과는 크기를 잴 수 없고, 휴대폰에서 첫 화면이 느려지므로)
+NOTE_MATHJAX = MATHJAX.replace("options: {", "startup: { typeset: false },\n  options: {")
+
+NOTE_CSS = r"""
+<style>
+/* 정리 노트: 과(강의자료) 단위 보기 · 목차 이동 · 휴대폰 읽기 */
+body.note { font-size: calc(16px * var(--fs, 1)); }
+.chapbar { position: sticky; top: var(--toph, 49px); z-index: 4; background: var(--paper); border-bottom: 1px solid var(--line); }
+.chapbar .in { max-width: 1180px; margin: 0 auto; padding: 6px 16px; display: flex; gap: 8px; align-items: center; }
+.chapbar select { flex: 1; min-width: 0; font: inherit; font-size: 15px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); }
+.chapbar .btn { flex: none; min-height: 36px; }
+.chapbar .pos { flex: none; font-family: var(--font-num); font-size: 13px; color: var(--muted); }
+.prog { height: 3px; background: transparent; }
+.prog i { display: block; height: 100%; width: 0; background: var(--accent); }
+.chap[hidden] { display: none; }
+.chap > h1:first-child { margin-top: 8px; }
+.chapnav { display: flex; gap: 10px; justify-content: space-between; margin: 40px 0 0; padding-top: 16px; border-top: 1px solid var(--line); }
+.chapnav a { flex: 1; display: block; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); text-decoration: none; color: var(--ink); font-size: 14px; min-height: 44px; }
+.chapnav a small { display: block; color: var(--muted); font-size: 12px; }
+.chapnav a.nx { text-align: right; }
+.chapnav a:hover { border-color: var(--accent); }
+.toc .ch { display: block; }
+.toc .ch > a.l1 { padding: 6px 0; }
+.toc .ch.on > a.l1 { color: var(--accent); }
+.toc .ch:not(.on) .subs { display: none; }
+.toc a.here { color: var(--accent); font-weight: 700; }
+.toc .tools { display: flex; gap: 6px; margin: 4px 0 8px; }
+.toc .tools .btn { font-size: 13px; padding: 2px 10px; }
+.fab { display: none; }
+.scrim { display: none; }
+@media (min-width: 861px) {
+  body.note .toc { top: calc(var(--toph, 49px) + var(--barh, 52px) + 12px); max-height: calc(100vh - var(--toph, 49px) - var(--barh, 52px) - 24px); }
+}
+@media (max-width: 860px) {
+  body.note { line-height: 1.75; }
+  .wrap { padding: 12px 14px 96px; gap: 0; }
+  .chap > h1 { font-size: 1.35rem; }
+  h2 { font-size: 1.2rem; margin-top: 30px; }
+  h3 { font-size: 1.06rem; }
+  ul { padding-left: 1.05em; }
+  /* 목차는 서랍으로 */
+  .toc { position: fixed; top: 0; bottom: 0; left: 0; width: min(86vw, 340px); max-height: none; z-index: 20; margin: 0;
+         border: 0; border-right: 1px solid var(--line); border-radius: 0; padding: 14px 14px 40px; background: var(--card);
+         transform: translateX(-105%); transition: transform .2s ease; overflow-y: auto; font-size: 15px; }
+  .toc a { padding: 7px 0; }
+  .toc .l3 { font-size: 14px; }
+  body.drawer .toc { transform: none; box-shadow: 0 0 24px rgba(0,0,0,.25); }
+  body.drawer .scrim { display: block; position: fixed; inset: 0; z-index: 19; background: rgba(0,0,0,.35); }
+  .toc details > summary { pointer-events: none; list-style: none; font-size: 16px; }
+  .toc details > summary::-webkit-details-marker { display: none; }
+  .fab { display: flex; position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 18; gap: 8px; }
+  .fab .btn { min-height: 46px; min-width: 46px; padding: 0 16px; font-size: 15px; font-weight: 700; box-shadow: 0 2px 10px rgba(0,0,0,.18); }
+  .fab .btn.main { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .chapbar .pos { display: none; }
+  .chapnav { flex-direction: column; }
+  .chapnav a.nx { text-align: left; }
+  .top nav { padding: 8px 14px; gap: 4px 14px; font-size: 14px; }
+}
+@media print { .chapbar, .fab, .toc, .chapnav, .top { display: none !important; } .chap[hidden] { display: block !important; } .wrap { display: block; } }
+</style>"""
+
+NOTE_JS = r"""
+<script>
+(() => {
+  const chaps = [...document.querySelectorAll('section.chap')];
+  const sel = document.getElementById('chapSel'), pos = document.getElementById('chapPos');
+  const tocChs = [...document.querySelectorAll('.toc .ch')];
+  const bar = document.querySelector('.prog i');
+  const store = (() => { try { const k = '__t'; localStorage.setItem(k, k); localStorage.removeItem(k); return localStorage; } catch (e) { return null; } })();
+  const KEY = 'note:' + document.title;
+  const done = new Set();
+  let cur = -1;
+
+  const setTop = () => {
+    const r = document.documentElement.style;
+    r.setProperty('--toph', document.querySelector('.top').offsetHeight + 'px');
+    r.setProperty('--barh', document.querySelector('.chapbar').offsetHeight + 'px');
+  };
+  setTop(); addEventListener('resize', setTop);
+  const offset = () => document.querySelector('.top').offsetHeight + document.querySelector('.chapbar').offsetHeight + 8;
+  document.documentElement.style.scrollPaddingTop = '0px';
+
+  function typeset(i) {
+    if (done.has(i)) return Promise.resolve();
+    done.add(i);
+    const go = () => window.MathJax.typesetPromise([chaps[i]]).catch(() => {});
+    if (window.MathJax && window.MathJax.typesetPromise) return go();
+    return new Promise(res => {
+      const t = setInterval(() => { if (window.MathJax && window.MathJax.typesetPromise) { clearInterval(t); go().then(res); } }, 100);
+      setTimeout(() => { clearInterval(t); res(); }, 15000);
+    });
+  }
+  function scrollToEl(el) {
+    const y = el ? el.getBoundingClientRect().top + scrollY - offset() : 0;
+    scrollTo({ top: Math.max(0, y) });
+  }
+  function show(i, targetId, push) {
+    i = Math.max(0, Math.min(chaps.length - 1, i));
+    if (i !== cur) {
+      chaps.forEach((c, k) => { c.hidden = k !== i; });
+      tocChs.forEach((c, k) => c.classList.toggle('on', k === i));
+      sel.value = String(i);
+      pos.textContent = (i + 1) + ' / ' + chaps.length;
+      cur = i;
+      if (store) store.setItem(KEY, String(i));
+    }
+    const target = targetId ? document.getElementById(targetId) : null;
+    scrollToEl(target);
+    typeset(i).then(() => { if (target) scrollToEl(target); spy(); });
+    if (push) history.replaceState(null, '', '#' + (targetId || chaps[i].id));
+  }
+  function chapOf(id) {
+    const el = id && document.getElementById(id);
+    const c = el && el.closest('section.chap');
+    return c ? chaps.indexOf(c) : -1;
+  }
+  function fromHash() {
+    const id = decodeURIComponent(location.hash.slice(1));
+    const k = chapOf(id);
+    if (k >= 0) { show(k, chaps[k].id === id ? null : id); return true; }
+    return false;
+  }
+
+  sel.addEventListener('change', () => show(+sel.value, null, true));
+  document.querySelectorAll('[data-go]').forEach(b => b.addEventListener('click', e => {
+    e.preventDefault(); show(cur + (+b.dataset.go), null, true);
+  }));
+  // 페이지 안의 모든 #링크(목차·(→ 2.3.1)·다른 과로 가는 링크)를 과 전환으로
+  document.addEventListener('click', e => {
+    const a = e.target.closest('a[href]');
+    if (!a) return;
+    const h = a.getAttribute('href');
+    const m = h.match(/^(?:note\.html)?#(.+)$/);
+    if (!m) return;
+    const k = chapOf(decodeURIComponent(m[1]));
+    if (k < 0) return;
+    e.preventDefault();
+    document.body.classList.remove('drawer');
+    show(k, chaps[k].id === m[1] ? null : m[1], true);
+  });
+  addEventListener('hashchange', fromHash);
+
+  // 목차 서랍(휴대폰)
+  const toggle = open => document.body.classList.toggle('drawer', open);
+  document.getElementById('tocBtn').addEventListener('click', () => {
+    toggle(!document.body.classList.contains('drawer'));
+    const here = document.querySelector('.toc a.here') || document.querySelector('.toc .ch.on > a');
+    if (here) here.scrollIntoView({ block: 'center' });
+  });
+  document.querySelector('.scrim').addEventListener('click', () => toggle(false));
+  addEventListener('keydown', e => { if (e.key === 'Escape') toggle(false); });
+  document.getElementById('topBtn').addEventListener('click', () => scrollTo({ top: 0 }));
+
+  // 글자 크기
+  let fs = store ? parseFloat(store.getItem('note:fs')) || 1 : 1;
+  const applyFs = () => { document.body.style.setProperty('--fs', fs); if (store) store.setItem('note:fs', fs); };
+  document.querySelectorAll('[data-fs]').forEach(b => b.addEventListener('click', () => {
+    fs = Math.max(.85, Math.min(1.4, +(fs + (+b.dataset.fs)).toFixed(2))); applyFs();
+  }));
+  applyFs();
+
+  // 지금 읽는 절을 목차에 표시 + 진행 막대
+  const links = new Map([...document.querySelectorAll('.toc a[href^="#"]')].map(a => [a.getAttribute('href').slice(1), a]));
+  function spy() {
+    if (cur < 0) return;
+    const hs = chaps[cur].querySelectorAll('h1[id], h2[id], h3[id]');
+    let best = null;
+    for (const h of hs) { if (h.getBoundingClientRect().top - offset() <= 4) best = h; else break; }
+    document.querySelectorAll('.toc a.here').forEach(a => a.classList.remove('here'));
+    const a = best && links.get(best.id);
+    if (a) a.classList.add('here');
+    const r = chaps[cur].getBoundingClientRect(), total = r.height - innerHeight + offset();
+    bar.style.width = (total > 0 ? Math.min(100, Math.max(0, (-r.top + offset()) / total * 100)) : 100) + '%';
+  }
+  let tick = false;
+  addEventListener('scroll', () => { if (!tick) { tick = true; requestAnimationFrame(() => { tick = false; spy(); }); } }, { passive: true });
+
+  // 휴대폰에서 옆으로 밀어 이전·다음 과
+  let sx = 0, sy = 0, st = 0;
+  addEventListener('touchstart', e => { const t = e.touches[0]; sx = t.clientX; sy = t.clientY; st = Date.now(); }, { passive: true });
+  addEventListener('touchend', e => {
+    if (document.body.classList.contains('drawer')) return;
+    if (e.target.closest('.tbl, .disp, pre, mjx-container, .toc')) return;
+    const t = e.changedTouches[0], dx = t.clientX - sx, dy = t.clientY - sy;
+    if (Date.now() - st < 600 && Math.abs(dx) > 90 && Math.abs(dy) < 40) show(cur + (dx < 0 ? 1 : -1), null, true);
+  }, { passive: true });
+
+  if (!fromHash()) {
+    const last = store ? parseInt(store.getItem(KEY), 10) : NaN;
+    show(Number.isFinite(last) ? last : 0);
+  }
+})();
+</script>"""
+
+
+def chap_plain(t):
+    """대분류 제목 → 목차·고르기 칸에 쓸 글자 (꾸밈 표시 뺌)."""
+    return html.unescape(re.sub(r"<[^>]+>", "", webmd.inline(t, "note.html"))).replace("\\(", "").replace("\\)", "")
+
+
 def build_note():
     lines = read_lines(NOTE)
-    toc = []
-    body = webmd.render(lines[1:], note_page="note.html", toc=toc, shift=0)
     title = lines[0].lstrip("# ").strip()
-    legend = ('<div class="legend"><span>검정 = 강의자료</span><span class="tag hw">필기</span><span class="tag board">판서</span>'
-              '<span style="color:var(--lec)">회색 = 강의 녹음</span><span style="color:var(--imp);font-weight:700">빨강 = 교수 강조</span>'
-              '<span style="color:var(--ext)">파랑 = 자료에 없음</span><mark>핵심</mark><mark class="pink">헷갈림</mark><mark class="blue">반대편</mark></div>')
-    body = f'<div class="body"><h1>{html.escape(title)}</h1>{legend}{body}</div>'
-    open(os.path.join(WEB, "note.html"), "w", encoding="utf-8").write(
-        page(f"{COURSE} 정리 노트", "note.html", body, toc_html=toc_block(toc, (1, 2))))
+    pre, chaps = split_chapters(lines[1:])
+    if NOTE_ALL or len(chaps) < 2:
+        toc = []
+        body = webmd.render(lines[1:], note_page="note.html", toc=toc, shift=0)
+        body = f'<div class="body"><h1>{html.escape(title)}</h1>{NOTE_LEGEND}{body}</div>'
+        open(os.path.join(WEB, "note.html"), "w", encoding="utf-8").write(
+            page(f"{COURSE} 정리 노트", "note.html", body, toc_html=toc_block(toc, (1, 2))))
+        return
+
+    secs, toc_parts, opts = [], [], []
+    for k, (ctitle, clines) in enumerate(chaps):
+        toc = []
+        inner = webmd.render(clines, note_page="note.html", toc=toc, shift=0)
+        plain = chap_plain(ctitle)
+        prev_a = (f'<a class="pv" href="#" data-go="-1"><small>← 이전 과</small>{html.escape(chap_plain(chaps[k - 1][0]))}</a>'
+                  if k > 0 else '<span></span>')
+        next_a = (f'<a class="nx" href="#" data-go="1"><small>다음 과 →</small>{html.escape(chap_plain(chaps[k + 1][0]))}</a>'
+                  if k + 1 < len(chaps) else '<span></span>')
+        secs.append(f'<section class="chap" id="chap-{k + 1}" data-title="{html.escape(plain)}"{" hidden" if k else ""}>'
+                    f'{inner}<nav class="chapnav" aria-label="과 이동">{prev_a}{next_a}</nav></section>')
+        subs = "".join(f'<a class="l{lv}" href="#{hid}">{html.escape(t)}</a>' for lv, hid, t in toc if lv in (2, 3))
+        toc_parts.append(f'<div class="ch"><a class="l1" href="#chap-{k + 1}">{html.escape(plain)}</a><div class="subs">{subs}</div></div>')
+        opts.append(f'<option value="{k}">{k + 1}. {html.escape(plain)}</option>' if not re.match(r"^\d", plain)
+                    else f'<option value="{k}">{html.escape(plain)}</option>')
+
+    head = webmd.render(pre, note_page="note.html") if any(l.strip() and l.strip() != "---" for l in pre) else ""
+    head_html = (f'<details class="intro"><summary>노트 머리말 · 색 표시</summary>{head}{NOTE_LEGEND}</details>'
+                 if head else f'<details class="intro"><summary>색 표시</summary>{NOTE_LEGEND}</details>')
+    body = (f'<div class="body"><h1 style="font-size:1.3rem">{html.escape(title)}</h1>{head_html}{"".join(secs)}</div>')
+    toc_html = ('<nav class="toc" aria-label="목차"><details open><summary>목차 · 강의자료별</summary>'
+                '<div class="tools"><button class="btn" type="button" data-fs="-0.1" aria-label="글자 작게">가−</button>'
+                '<button class="btn" type="button" data-fs="0.1" aria-label="글자 크게">가+</button></div>'
+                + "".join(toc_parts) + '</details></nav>')
+    chapbar = ('<div class="chapbar"><div class="in">'
+               '<button class="btn" type="button" data-go="-1" aria-label="이전 과">‹</button>'
+               f'<select id="chapSel" aria-label="과 고르기">{"".join(opts)}</select>'
+               '<button class="btn" type="button" data-go="1" aria-label="다음 과">›</button>'
+               '<span class="pos" id="chapPos"></span></div><div class="prog"><i></i></div></div>')
+    extras = ('<div class="scrim"></div><div class="fab"><button class="btn" id="topBtn" type="button" aria-label="맨 위로">↑</button>'
+              '<button class="btn main" id="tocBtn" type="button" aria-label="목차 열기">목차</button></div>')
+    out = page(f"{COURSE} 정리 노트", "note.html", body, extra_head=NOTE_CSS, toc_html=toc_html,
+               extra_js=extras + NOTE_JS, mathjax=NOTE_MATHJAX, body_class="note")
+    out = out.replace("</header>\n", "</header>\n" + chapbar + "\n", 1)
+    open(os.path.join(WEB, "note.html"), "w", encoding="utf-8").write(out)
 
 
 def build_guide():
@@ -558,7 +817,7 @@ def build_index(nq):
 
 
 def main():
-    global ROOT, WEB, NOTE, GUIDE, EXAM, CONCEPTS, MINDMAP_MD, TITLE, COURSE, SCOPE
+    global ROOT, WEB, NOTE, GUIDE, EXAM, CONCEPTS, MINDMAP_MD, TITLE, COURSE, SCOPE, NOTE_ALL
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default=".", help="과목 폴더")
     ap.add_argument("--prefix", required=True, help='파일 이름 앞부분, 예: "화폐금융론_1강~8강_"')
@@ -569,6 +828,7 @@ def main():
     ap.add_argument("--mindmap-md", default="", help="마인드맵 .md 출력 경로")
     ap.add_argument("--single-file", action="store_true", help="그림을 넣은 한 파일짜리 페이지도 만든다 (claude.ai·휴대폰용)")
     ap.add_argument("--out-dir", default="", help="--single-file 결과 폴더 (기본: web/single)")
+    ap.add_argument("--note-all", action="store_true", help="정리 노트를 과(강의자료)별로 나누지 않고 한 페이지에 전부")
     a = ap.parse_args()
     ROOT = os.path.abspath(a.dir)
     WEB = os.path.join(ROOT, "web")
@@ -578,6 +838,7 @@ def main():
     CONCEPTS = os.path.abspath(a.concepts) if a.concepts else ""
     MINDMAP_MD = os.path.abspath(a.mindmap_md) if a.mindmap_md else os.path.join(ROOT, a.prefix + "마인드맵.md")
     TITLE, SCOPE = a.title, a.scope
+    NOTE_ALL = a.note_all
     COURSE = a.course or a.prefix.split("_")[0]
     if not os.path.exists(NOTE):
         raise SystemExit("study note가 없습니다: " + NOTE)
